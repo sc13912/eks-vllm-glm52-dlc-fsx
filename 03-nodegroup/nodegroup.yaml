@@ -1,0 +1,64 @@
+# MLCB-backed p5en managed node group, ONE self-contained eksctl file.
+# Created at desiredCapacity 0 (avoids ASG launch errors before the CB is active); scale to 2 when CB active.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${REGION}
+
+autoModeConfig:
+  enabled: false        # keep classic MNG; future-proof vs eksctl Auto Mode default
+
+managedNodeGroups:
+  - name: p5en-cb
+    amiFamily: AmazonLinux2023          # eksctl auto-selects the NVIDIA accelerated AMI for p5en
+    instanceType: p5en.48xlarge         
+
+    # --- Consume the ML Capacity Block (eksctl builds the LT + sets CapacityType=CAPACITY_BLOCK) ---
+    capacityReservation:
+      capacityReservationTarget:
+        capacityReservationID: ${CB_RESERVATION_ID}
+    instanceMarketOptions:
+      marketType: capacity-block       
+
+    # --- Placement: single AZ = the CB's AZ ---
+    availabilityZones: ["${CB_AZ}"]
+
+    # --- Sizing: create at 0, scale to 2 when the CB is ACTIVE ---
+    desiredCapacity: 0
+    minSize: 0
+    maxSize: 2
+
+    # --- EFA + GPU ---
+    efaEnabled: true                     # installs aws-efa-k8s-device-plugin, wires EFA interfaces
+    privateNetworking: true
+    volumeSize: 300
+
+    # --- AL2023 NodeConfig: FastImagePull (SOCI parallel pull). For AL2023, overrideBootstrapCommand
+    #     is MERGED into the nodeadm user data (it does not replace the bootstrap). 
+    overrideBootstrapCommand: |
+      apiVersion: node.eks.aws/v1alpha1
+      kind: NodeConfig
+      spec:
+        featureGates:
+          FastImagePull: true
+
+    labels:
+      role: gpu
+      nvidia.com/gpu: "true"
+    # DAY-2 HARDENING : a GPU taint keeps non-GPU pods off these expensive nodes. 
+    # taints:
+    #   - key: nvidia.com/gpu
+    #     value: "true"
+    #     effect: NoSchedule
+    propagateASGTags: true
+    tags:
+      auto-delete: "no"
+      project: glm52-poc
+    iam:
+      withAddonPolicies:
+        ebs: true
+        fsx: true
+        cloudWatch: true
+

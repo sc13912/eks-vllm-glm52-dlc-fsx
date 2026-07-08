@@ -1,0 +1,21 @@
+# Phase 2c — static PersistentVolume bound to the pre-created FSx Lustre file system.
+# envsubst < 02-fsx/fsx-pv.yaml | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fsx-glm52-pv
+spec:
+  capacity:
+    storage: ${FSX_CAPACITY_GIB}Gi   
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany          # shared across leader + worker + download job
+  mountOptions:
+    - flock
+  persistentVolumeReclaimPolicy: Retain
+  csi:
+    driver: fsx.csi.aws.com
+    volumeHandle: ${FSX_ID}
+    volumeAttributes:
+      dnsname: ${FSX_DNS}
+      mountname: ${FSX_MOUNT_NAME}

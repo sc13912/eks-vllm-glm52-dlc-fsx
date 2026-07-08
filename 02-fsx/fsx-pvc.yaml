@@ -1,0 +1,15 @@
+# Phase 2c — PVC that binds to the static FSx Lustre PV above.
+# envsubst < 02-fsx/fsx-pvc.yaml | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fsx-glm52-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""        # static binding — no dynamic provisioning
+  volumeName: fsx-glm52-pv
+  resources:
+    requests:
+      storage: ${FSX_CAPACITY_GIB}Gi   

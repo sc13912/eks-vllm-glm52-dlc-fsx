@@ -1,0 +1,122 @@
+# vLLM serving via LeaderWorkerSet + Ray across 2× p5en (TP=8 × PP=2).
+# Leader runs the Ray head + vLLM API server; the worker joins the Ray cluster.
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: glm52
+  namespace: default
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2                              # 1 leader + 1 worker = PP degree (2 nodes)
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels: { role: leader, app: glm52 }
+      spec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+          - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        containers:
+          - name: vllm-leader
+            image: ${IMAGE_URI}
+            securityContext:
+              privileged: true
+              capabilities: { add: ["IPC_LOCK"] }
+            command: ["/bin/bash", "-lc"]
+            args:
+              - |
+                set -euo pipefail
+                ray start --head --port=6379 --num-gpus=8 \
+                  --dashboard-host=0.0.0.0 --dashboard-port=8265
+                # Wait for the worker to register (2 nodes => 16 GPUs) before launching vLLM.
+                for i in $(seq 1 60); do
+                  gpus=$(ray status 2>/dev/null | awk -F'[/. ]' '/GPU/{print $1; exit}' || echo 0)
+                  echo "ray GPUs visible: ${gpus}"
+                  ray status 2>/dev/null | grep -q "16.0/16.0 GPU\|0.0/16.0 GPU" && break
+                  sleep 10
+                done
+                exec vllm serve ${MODEL_DIR} \
+                  --served-model-name glm-5.2-fp8 \
+                  --tensor-parallel-size 8 \
+                  --pipeline-parallel-size 2 \
+                  --distributed-executor-backend ray \
+                  --load-format runai_streamer \
+                  --model-loader-extra-config '{"concurrency":32,"memory_limit":10737418240}' \
+                  --kv-cache-dtype fp8 \
+                  --max-model-len 1048576 \
+                  --gpu-memory-utilization 0.90 \
+                  --trust-remote-code \
+                  --tool-call-parser glm47 --enable-auto-tool-choice \
+                  --host 0.0.0.0 --port 8000
+            env:
+              - { name: FI_PROVIDER, value: efa }
+              - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+              - { name: FI_EFA_FORK_SAFE, value: "1" }
+              - { name: NCCL_DEBUG, value: INFO }
+              - { name: RAY_WORKER_REGISTER_TIMEOUT_SECONDS, value: "600" }
+              # Persist the torch.compile cache on FSx so it survives pod recreation. vLLM's default
+              # (/root/.cache/vllm) is wiped every restart → recompiles ~30s each time. 
+              - { name: VLLM_CACHE_ROOT, value: /mnt/fsx/vllm_compile_cache }
+              - { name: HF_HUB_OFFLINE, value: "1" }   # deterministic offline start (weights already on FSx)
+              - name: VLLM_HOST_IP
+                valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            ports:
+              - { containerPort: 8000, name: http }
+              - { containerPort: 8265, name: ray-dash }
+            resources:
+              limits:   { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 5120Mi, memory: 1600Gi }
+              requests: { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 5120Mi, memory: 1600Gi }
+            readinessProbe:
+              httpGet: { path: /health, port: 8000 }
+              initialDelaySeconds: 300      # weight load (runai_streamer ~2-5 min) + graph capture
+              periodSeconds: 15
+              failureThreshold: 60
+            volumeMounts:
+              - { name: fsx, mountPath: /mnt/fsx }
+              - { name: shm, mountPath: /dev/shm }
+        volumes:
+          - name: fsx
+            persistentVolumeClaim: { claimName: fsx-glm52-pvc }
+          - name: shm
+            emptyDir: { medium: Memory, sizeLimit: 512Gi }
+    workerTemplate:
+      metadata:
+        labels: { role: worker, app: glm52 }
+      spec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+          - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        containers:
+          - name: vllm-worker
+            image: ${IMAGE_URI}
+            securityContext:
+              privileged: true
+              capabilities: { add: ["IPC_LOCK"] }
+            command: ["/bin/bash", "-lc"]
+            args:
+              - |
+                set -euo pipefail
+                ray start --address=$(LWS_LEADER_ADDRESS):6379 --num-gpus=8 --block
+            env:
+              - { name: FI_PROVIDER, value: efa }
+              - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+              - { name: FI_EFA_FORK_SAFE, value: "1" }
+              - { name: NCCL_DEBUG, value: INFO }
+              - { name: VLLM_CACHE_ROOT, value: /mnt/fsx/vllm_compile_cache }   # shared compile cache (see leader)
+              - { name: HF_HUB_OFFLINE, value: "1" }
+              - name: VLLM_HOST_IP
+                valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            resources:
+              limits:   { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 5120Mi, memory: 1600Gi }
+              requests: { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 5120Mi, memory: 1600Gi }
+            volumeMounts:
+              - { name: fsx, mountPath: /mnt/fsx }
+              - { name: shm, mountPath: /dev/shm }
+        volumes:
+          - name: fsx
+            persistentVolumeClaim: { claimName: fsx-glm52-pvc }
+          - name: shm
+            emptyDir: { medium: Memory, sizeLimit: 512Gi }

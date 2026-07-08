@@ -1,0 +1,63 @@
+# Phase 1 — empty EKS control plane + a small CPU system node group.
+# NO GPU nodes here; the p5en nodes come from the CB-backed managed node group in Phase 3.
+# Apply with:  envsubst < 01-cluster/cluster.yaml | eksctl create cluster -f -
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${REGION}
+  version: "${K8S_VERSION}"
+  # Cluster-wide tags — eksctl stamps these onto the resources IT creates: the VPC, NAT gateway(s),
+  # EIP(s), subnets, and the CloudFormation stacks. NAT gateway + EIP are reaper-tracked billable types,
+  # so this is essential, not cosmetic. (Reaper protection: key auto-delete, value no.)
+  tags:
+    auto-delete: "no"
+    project: glm52-poc
+
+autoModeConfig:
+  enabled: false        # disable AutoMode
+
+iam:
+  withOIDC: true   # required for IRSA (FSx CSI, ALB controller, etc.)
+
+# VPC spans just 2a + 2b. Everything real (FSx in Phase 2, p5en node group in Phase 3) lives in
+# 2a = ${CB_AZ}; 2b exists only because the EKS control plane requires subnets in at least TWO AZs.
+# No 4-AZ sprawl. Safe to create now, ahead of the CB start — no GPU nodes come up until Phase 3.
+availabilityZones:
+  - ap-northeast-2a   # = ${CB_AZ}; FSx + p5en managed node group both pin here
+  - ap-northeast-2b   # minimal second AZ — required by the EKS control plane, otherwise unused
+
+addons:
+  - name: vpc-cni
+    version: latest          # >= 1.18.5 for efa-only interfaces on the p5en nodes
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+
+# CPU-only system node group for controllers (LWS, FSx CSI, MPI operator, ALB, GPU device plugin).
+managedNodeGroups:
+  - name: system
+    privateNetworking: true   # keep system nodes in PRIVATE subnets (egress via NAT)
+    instanceType: m6i.4xlarge
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 3
+    volumeSize: 100
+    labels:
+      role: system
+    # Reaper protection. `tags` sets EKS-nodegroup tags; `propagateASGTags` pushes them onto the
+    # owned Auto Scaling Group WITH PropagateAtLaunch=true, so the ASG itself (a reaper-tracked type)
+    # and every instance/volume it launches self-tag. Tagging only the nodegroup is NOT enough — the
+    # reaper tracks the ASG separately and would scale it to 0.
+    propagateASGTags: true
+    tags:
+      auto-delete: "no"
+      project: glm52-poc
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator", "controllerManager", "scheduler"]

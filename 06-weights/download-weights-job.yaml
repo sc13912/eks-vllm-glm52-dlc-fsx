@@ -1,0 +1,62 @@
+# one-time download of GLM-5.2-FP8 (~705 GB, 141 safetensors shards) onto FSx for Lustre.
+#
+# Note: FSx for Lustre auto-stripes large files across ALL OSTs via its default Progressive File Layout 
+# (files > ~100 MiB fan out to every OST, capped at the OST count).
+# Our ~5 GB shards therefore land on all 4 OSTs on their own — verified with `lfs getstripe` in Phase 2.
+#
+# Prereqs (already in the cluster):
+#   kubectl create secret generic hf-token --from-literal=token="$HF_TOKEN"
+#   export MODEL_DIR=/mnt/fsx/glm-5.2-fp8 HF_MODEL=zai-org/GLM-5.2-FP8
+#   envsubst '${MODEL_DIR} ${HF_MODEL}' < 06-weights/download-weights-job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm52-weight-download
+  namespace: default
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200          # generous cap: ~13 min download + verify
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        role: system                   # CPU system node — no GPU needed to download
+      containers:
+        - name: hf-download
+          image: python:3.12-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # huggingface_hub >=1.x uses the Xet backend for high-performance downloads.
+              pip install --no-cache-dir "huggingface_hub[hf_xet]"
+              export HF_XET_HIGH_PERFORMANCE=1
+              export HF_TOKEN="$(cat /secrets/hf/token)"
+              mkdir -p "${MODEL_DIR}"
+              hf download "${HF_MODEL}" --local-dir "${MODEL_DIR}" --max-workers 8
+              echo "=== downloaded shards ==="
+              # awk (NOT head) drains the whole stream -> no SIGPIPE / spurious exit 141 under pipefail.
+              ls -lh "${MODEL_DIR}" | awk 'NR<=12'
+              du -sh "${MODEL_DIR}" || true
+              echo "=== shard count vs index ==="
+              want=$(grep -oE 'model-[0-9]+-of-[0-9]+\.safetensors' "${MODEL_DIR}/model.safetensors.index.json" | sort -u | wc -l)
+              have=$(ls "${MODEL_DIR}"/model-*.safetensors 2>/dev/null | wc -l)
+              echo "shards referenced by index: ${want}, present on disk: ${have}"
+              if [ "${want}" -eq "${have}" ] && [ "${want}" -gt 0 ]; then
+                echo "OK: all ${have} shards present"
+              else
+                echo "MISSING SHARDS (want=${want} have=${have})" >&2
+                exit 1
+              fi
+          env:
+            - { name: HF_HOME, value: /mnt/fsx/.hf }
+          volumeMounts:
+            - { name: fsx, mountPath: /mnt/fsx }
+            - { name: hf,  mountPath: /secrets/hf, readOnly: true }
+      volumes:
+        - name: fsx
+          persistentVolumeClaim:
+            claimName: fsx-glm52-pvc
+        - name: hf
+          secret:
+            secretName: hf-token
