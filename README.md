@@ -15,7 +15,7 @@ internal-only (ClusterIP + `kubectl port-forward` — no internet-facing load ba
 
 | Step | Dir | What |
 |---|---|---|
-| 1 | [01-cluster/](01-cluster/) | Empty EKS cluster (control plane + CPU system NG), 2-AZ VPC |
+| 1 | [01-cluster/](01-cluster/) | Provision EKS cluster (control plane + CPU system NG), 2-AZ VPC |
 | 2 | [02-fsx/](02-fsx/) | FSx for Lustre (EFA, PERSISTENT_2, **4 OSTs**) + CSI + PV/PVC |
 | 3 | [03-nodegroup/](03-nodegroup/) | Capacity-Block p5en node group + NVIDIA device plugin |
 | 4 | [04-efa-validation/](04-efa-validation/) | NCCL `all_reduce_perf` EFA/GPUDirect test |
@@ -58,8 +58,6 @@ You can do everything **except** the GPU-dependent steps ahead of the reservatio
 ---
 
 ## Common environment
-
-Set once per shell; every step reuses these (see `notes-summary.txt` for the per-step detail):
 
 ```bash
 export AWS_REGION="ap-northeast-2"; export REGION="$AWS_REGION"
