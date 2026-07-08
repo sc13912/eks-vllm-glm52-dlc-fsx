@@ -1,0 +1,8 @@
+# GitHub Linguist language-detection overrides.
+#
+# This is a Kubernetes-manifests repo: ~93% of it is YAML. But Linguist classifies YAML as a
+# "data" language, and data/prose types are excluded from the language bar by default — which
+# left only the Dockerfile ("programming") counted, showing a misleading "100% Dockerfile".
+# Force YAML to be counted so the stats reflect the repo accurately.
+*.yaml linguist-detectable=true
+*.yml  linguist-detectable=true
